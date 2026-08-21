@@ -37,6 +37,8 @@ sudo systemctl restart proxyfleet-xui-sync.service
 
 The timer runs 90 seconds after boot and then roughly every two minutes. It
 does not launch a second copy while the previous run is still active.
+Failed runs are retried by the timer instead of an immediate restart loop, so
+the original Python error remains visible in the journal.
 
 ## Operations
 
@@ -45,6 +47,15 @@ systemctl status proxyfleet-xui-sync.timer
 systemctl list-timers proxyfleet-xui-sync.timer
 journalctl -u proxyfleet-xui-sync.service -n 100 --no-pager
 systemctl start proxyfleet-xui-sync.service
+```
+
+If systemd reports `Start request repeated too quickly`, reset the old failure
+counter and run the service once to expose the original error:
+
+```bash
+systemctl reset-failed proxyfleet-xui-sync.service
+systemctl start proxyfleet-xui-sync.service
+journalctl -u proxyfleet-xui-sync.service -n 80 --no-pager -o cat
 ```
 
 For a dry-run, temporarily set `DRY_RUN=true` in the environment file and
@@ -77,4 +88,3 @@ never contacts the production endpoint or systemd.
 ```bash
 python3 tests/smoke_test.py
 ```
-
