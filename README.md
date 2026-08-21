@@ -3,9 +3,9 @@
 `proxyfleet-xui-sync` safely synchronizes the managed `TH-<number>`
 outbounds exported by ProxyFleet into x-ui's `xrayTemplateConfig`.
 
-It preserves every non-TH outbound and every routing rule. The only routing
-value it changes is the selector of the configured balancer (by default
-`ADMOB-BALANCER`).
+It preserves every non-TH outbound and every routing rule. It creates the
+configured balancer when missing (by default `ADMOB-BALANCER`) and otherwise
+changes only that balancer's selector.
 
 ## Safety guarantees
 
@@ -15,6 +15,7 @@ value it changes is the selector of the configured balancer (by default
 - Applies the database update in an immediate transaction.
 - Restores the backup automatically when x-ui fails to restart.
 - Uses a process lock so timer runs and manual runs cannot overlap.
+- Creates a missing managed balancer with the `random` strategy.
 - Keeps a configurable number of timestamped backups.
 - Supports a non-destructive dry-run.
 

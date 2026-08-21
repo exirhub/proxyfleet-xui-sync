@@ -46,9 +46,6 @@ def create_fixture_database(path):
         ],
         "routing": {
             "rules": [{"type": "field", "balancerTag": "ADMOB-BALANCER"}],
-            "balancers": [
-                {"tag": "ADMOB-BALANCER", "selector": ["TH-1"]}
-            ],
         },
     }
     connection = sqlite3.connect(path)
@@ -109,6 +106,7 @@ def main():
         assert result.returncode == 0, result.stderr
         assert "DRY RUN" in result.stdout
         assert "Changed TH proxies: 1" in result.stdout
+        assert "ADMOB-BALANCER balancer: will be created" in result.stdout
         assert database.read_bytes() == before, "dry-run modified the database"
 
     print("smoke test passed")
@@ -116,4 +114,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
