@@ -327,22 +327,29 @@ def validate_new_outbounds(outbounds):
     return sorted(tags, key=th_sort_key)
 
 
-def find_balancer(config):
+def find_or_create_balancer(config):
     routing = config.get("routing")
     if not isinstance(routing, dict):
         raise Exception("xrayTemplateConfig.routing not found")
 
     balancers = routing.get("balancers")
-    if not isinstance(balancers, list):
-        raise Exception("xrayTemplateConfig.routing.balancers not found")
+    if balancers is None:
+        balancers = []
+        routing["balancers"] = balancers
+    elif not isinstance(balancers, list):
+        raise Exception("xrayTemplateConfig.routing.balancers is not an array")
 
     for balancer in balancers:
         if str(balancer.get("tag", "")) == BALANCER_TAG:
-            return balancer
+            return balancer, False
 
-    raise Exception(
-        f"Balancer {BALANCER_TAG!r} not found"
-    )
+    balancer = {
+        "tag": BALANCER_TAG,
+        "selector": [],
+        "strategy": {"type": "random"},
+    }
+    balancers.append(balancer)
+    return balancer, True
 
 
 def restart_xui_or_rollback(backup):
@@ -545,7 +552,7 @@ for tag in sorted(
 # BALANCER DIFF
 # ============================================================
 
-balancer = find_balancer(config)
+balancer, balancer_created = find_or_create_balancer(config)
 
 old_selector = balancer.get("selector", [])
 
@@ -574,6 +581,10 @@ print("New TH outbounds:", len(new_th))
 print("Added TH tags:", len(added_tags))
 print("Removed TH tags:", len(removed_tags))
 print("Changed TH proxies:", len(changed_tags))
+print(
+    f"{BALANCER_TAG} balancer:",
+    "will be created" if balancer_created else "already exists"
+)
 print(
     f"{BALANCER_TAG} selector:",
     f"{len(old_selector)} -> {len(new_selector)}"
@@ -638,7 +649,7 @@ config["outbounds"] = kept_outbounds + [
     new_th[tag] for tag in new_tags
 ]
 
-# ONLY update ADMOB-BALANCER selector.
+# ONLY create/update ADMOB-BALANCER and its selector.
 # routing.rules are intentionally untouched.
 balancer["selector"] = new_selector
 

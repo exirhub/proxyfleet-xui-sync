@@ -3,8 +3,6 @@ Description=Synchronize ProxyFleet outbounds into x-ui
 Documentation=https://github.com/exirhub/proxyfleet-xui-sync
 Wants=network-online.target
 After=network-online.target x-ui.service
-StartLimitIntervalSec=300
-StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -14,8 +12,9 @@ UMask=0077
 EnvironmentFile=-/etc/proxyfleet-xui-sync.env
 ExecStart=/usr/bin/flock -n /run/lock/proxyfleet-xui-sync.lock /usr/bin/python3 /usr/local/lib/proxyfleet-xui-sync/proxyfleet-xui-sync.py
 TimeoutStartSec=120
-Restart=on-failure
-RestartSec=20
+# The timer is the retry mechanism. Immediate service restarts can hide the
+# original error behind systemd's start-rate limit.
+Restart=no
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6
