@@ -1,0 +1,32 @@
+[Unit]
+Description=Synchronize ProxyFleet outbounds into x-ui
+Documentation=https://github.com/exirhub/proxyfleet-xui-sync
+Wants=network-online.target
+After=network-online.target x-ui.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+EnvironmentFile=-/etc/proxyfleet-xui-sync.env
+ExecStart=/usr/bin/flock -n /run/lock/proxyfleet-xui-sync.lock /usr/bin/python3 /usr/local/lib/proxyfleet-xui-sync/proxyfleet-xui-sync.py
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=20
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
