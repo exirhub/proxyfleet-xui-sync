@@ -4,6 +4,7 @@ set -Eeuo pipefail
 readonly APP_NAME="proxyfleet-xui-sync"
 readonly INSTALL_DIR="/usr/local/lib/${APP_NAME}"
 readonly ENV_FILE="/etc/${APP_NAME}.env"
+readonly STATE_DIR="/var/lib/${APP_NAME}"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -21,6 +22,7 @@ done
 python3 -m py_compile "${SCRIPT_DIR}/proxyfleet-xui-sync.py"
 
 install -d -m 0755 "${INSTALL_DIR}"
+install -d -m 0700 "${STATE_DIR}"
 install -m 0750 \
   "${SCRIPT_DIR}/proxyfleet-xui-sync.py" \
   "${INSTALL_DIR}/proxyfleet-xui-sync.py"
@@ -39,7 +41,16 @@ if [[ ! -e "${ENV_FILE}" ]]; then
   echo "Created ${ENV_FILE}. Add PROXYFLEET_OUTBOUNDS_TOKEN if required."
 else
   chmod 0600 "${ENV_FILE}"
-  echo "Preserved existing ${ENV_FILE}."
+  while IFS= read -r line; do
+    if [[ ! "${line}" =~ ^[A-Z0-9_]+= ]]; then
+      continue
+    fi
+    key="${line%%=*}"
+    if ! grep -q "^${key}=" "${ENV_FILE}"; then
+      printf '\n%s\n' "${line}" >>"${ENV_FILE}"
+    fi
+  done <"${SCRIPT_DIR}/proxyfleet-xui-sync.env.example"
+  echo "Preserved existing values and added new defaults to ${ENV_FILE}."
 fi
 
 systemctl daemon-reload
@@ -50,4 +61,3 @@ echo
 echo "ProxyFleet XUI Sync installed successfully."
 echo "Timer: systemctl status proxyfleet-xui-sync.timer"
 echo "Logs:  journalctl -u proxyfleet-xui-sync.service -n 100 --no-pager"
-

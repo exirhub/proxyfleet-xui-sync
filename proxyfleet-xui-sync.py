@@ -3,9 +3,11 @@
 import urllib.request
 import urllib.error
 import base64
+import hashlib
 import json
 import sqlite3
 import shutil
+import tempfile
 import time
 import re
 import sys
@@ -43,7 +45,7 @@ MIN_CHANGES = int(os.environ.get("MIN_CHANGES", "1"))
 # true  = only sync when ProxyFleet reports Ready=1.
 REQUIRE_READY = os.environ.get(
     "REQUIRE_READY",
-    "false"
+    "true"
 ).strip().lower() in ("1", "true", "yes", "on")
 
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "25"))
@@ -55,6 +57,51 @@ XUI_SERVICE = os.environ.get(
     "XUI_SERVICE",
     "x-ui"
 ).strip() or "x-ui"
+
+SYSTEMCTL_BINARY = os.environ.get(
+    "SYSTEMCTL_BINARY",
+    "systemctl"
+).strip() or "systemctl"
+
+HOT_RELOAD = os.environ.get(
+    "HOT_RELOAD",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
+
+XRAY_BINARY = os.environ.get(
+    "XRAY_BINARY",
+    "/usr/local/x-ui/bin/xray-linux-amd64"
+).strip()
+
+XRAY_RUNTIME_CONFIG = os.environ.get(
+    "XRAY_RUNTIME_CONFIG",
+    "/usr/local/x-ui/bin/config.json"
+).strip()
+
+XRAY_API_SERVER = os.environ.get(
+    "XRAY_API_SERVER",
+    ""
+).strip()
+
+XRAY_API_TIMEOUT = max(
+    1,
+    int(os.environ.get("XRAY_API_TIMEOUT", "5"))
+)
+
+RESTART_STABLE_RUNS = max(
+    1,
+    int(os.environ.get("RESTART_STABLE_RUNS", "3"))
+)
+
+RESTART_COOLDOWN_SECONDS = max(
+    0,
+    int(os.environ.get("RESTART_COOLDOWN_SECONDS", "1800"))
+)
+
+STATE_FILE = os.environ.get(
+    "STATE_FILE",
+    "/var/lib/proxyfleet-xui-sync/state.json"
+).strip()
 
 BACKUP_RETENTION = max(
     1,
@@ -82,6 +129,168 @@ def th_sort_key(tag):
     if not match:
         return (1, str(tag))
     return (0, int(match.group(1)))
+
+
+def load_state():
+    default = {
+        "restart_candidate": "",
+        "restart_candidate_seen": 0,
+        "last_restart_at": 0,
+    }
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            return default
+        for key in default:
+            if key in loaded:
+                default[key] = loaded[key]
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"WARNING: could not read state file: {exc}")
+    return default
+
+
+def save_state(state):
+    directory = os.path.dirname(STATE_FILE) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".state-",
+        suffix=".json",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, STATE_FILE)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def change_fingerprint(new_th, new_tags):
+    payload = {
+        "outbounds": [new_th[tag] for tag in new_tags],
+        "selector": new_tags,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def discover_xray_api_server():
+    if not HOT_RELOAD:
+        raise Exception("HOT_RELOAD is disabled")
+    if not XRAY_BINARY or not os.path.isfile(XRAY_BINARY):
+        raise Exception(f"Xray binary not found: {XRAY_BINARY}")
+    if not os.access(XRAY_BINARY, os.X_OK):
+        raise Exception(f"Xray binary is not executable: {XRAY_BINARY}")
+    if XRAY_API_SERVER:
+        return XRAY_API_SERVER
+
+    try:
+        with open(XRAY_RUNTIME_CONFIG, "r", encoding="utf-8") as handle:
+            runtime_config = json.load(handle)
+    except Exception as exc:
+        raise Exception(
+            f"could not read Xray runtime config {XRAY_RUNTIME_CONFIG}: {exc}"
+        ) from exc
+
+    api = runtime_config.get("api")
+    if not isinstance(api, dict):
+        raise Exception("Xray runtime API is not configured")
+    services = api.get("services", [])
+    if "HandlerService" not in services:
+        raise Exception("Xray HandlerService is not enabled")
+    api_tag = str(api.get("tag", "api"))
+
+    for inbound in runtime_config.get("inbounds", []):
+        if str(inbound.get("tag", "")) != api_tag:
+            continue
+        port = int(inbound.get("port", 0))
+        if port <= 0 or port > 65535:
+            break
+        listen = str(inbound.get("listen", "127.0.0.1")).strip()
+        if listen in ("", "0.0.0.0"):
+            listen = "127.0.0.1"
+        elif listen in ("::", "[::]"):
+            listen = "[::1]"
+        elif ":" in listen and not listen.startswith("["):
+            listen = f"[{listen}]"
+        return f"{listen}:{port}"
+
+    raise Exception(f"Xray API inbound with tag {api_tag!r} was not found")
+
+
+def run_xray_api(*arguments):
+    result = subprocess.run(
+        [XRAY_BINARY, "api", *arguments],
+        check=False,
+        timeout=XRAY_API_TIMEOUT + 3,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise Exception(detail[-600:])
+
+
+def add_runtime_outbound(api_server, outbound):
+    descriptor, path = tempfile.mkstemp(
+        prefix="proxyfleet-outbound-",
+        suffix=".json",
+        text=True,
+    )
+    try:
+        document = {"outbounds": [outbound]}
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.write("\n")
+        os.chmod(path, 0o600)
+        run_xray_api(
+            "ado",
+            f"--server={api_server}",
+            f"--timeout={XRAY_API_TIMEOUT}",
+            path,
+        )
+    finally:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def hot_swap_outbounds(api_server, changed_tags, old_th, new_th):
+    for tag in changed_tags:
+        print(f"Hot-swapping outbound: {tag}")
+        run_xray_api(
+            "rmo",
+            f"--server={api_server}",
+            f"--timeout={XRAY_API_TIMEOUT}",
+            tag,
+        )
+        try:
+            add_runtime_outbound(api_server, new_th[tag])
+        except Exception:
+            # Best-effort runtime rollback. A controlled x-ui restart remains
+            # the final consistency fallback if this restoration also fails.
+            try:
+                add_runtime_outbound(api_server, old_th[tag])
+            except Exception as rollback_exc:
+                print(f"WARNING: runtime rollback failed for {tag}: {rollback_exc}")
+            raise
 
 
 def proxy_identity(outbound):
@@ -163,7 +372,7 @@ def header_bool(headers, name, default=False):
 def download_proxyfleet_outbounds():
     headers = {
         "Accept": "text/plain",
-        "User-Agent": "ProxyFleet-XUI-Sync/3.0",
+        "User-Agent": "ProxyFleet-XUI-Sync/4.0",
     }
 
     if OUTBOUNDS_TOKEN:
@@ -358,7 +567,7 @@ def restart_xui_or_rollback(backup):
 
     try:
         subprocess.run(
-            ["systemctl", "restart", XUI_SERVICE],
+            [SYSTEMCTL_BINARY, "restart", XUI_SERVICE],
             check=True,
             timeout=30
         )
@@ -366,7 +575,7 @@ def restart_xui_or_rollback(backup):
         time.sleep(XUI_RESTART_WAIT_SECONDS)
 
         status = subprocess.run(
-            ["systemctl", "is-active", "--quiet", XUI_SERVICE]
+            [SYSTEMCTL_BINARY, "is-active", "--quiet", XUI_SERVICE]
         )
 
         if status.returncode != 0:
@@ -383,7 +592,7 @@ def restart_xui_or_rollback(backup):
         print("Restoring previous database...")
 
         subprocess.run(
-            ["systemctl", "stop", XUI_SERVICE],
+            [SYSTEMCTL_BINARY, "stop", XUI_SERVICE],
             check=False
         )
 
@@ -402,7 +611,7 @@ def restart_xui_or_rollback(backup):
         os.chmod(DB, stat.S_IMODE(original.st_mode))
 
         subprocess.run(
-            ["systemctl", "start", XUI_SERVICE],
+            [SYSTEMCTL_BINARY, "start", XUI_SERVICE],
             check=False
         )
 
@@ -606,6 +815,12 @@ if selector_changed:
     print("Balancer selector will be synchronized.")
 
 if difference_count < MIN_CHANGES:
+    if not DRY_RUN:
+        state = load_state()
+        if state.get("restart_candidate") or state.get("restart_candidate_seen"):
+            state["restart_candidate"] = ""
+            state["restart_candidate_seen"] = 0
+            save_state(state)
     print("")
     print(
         f"SKIPPED: only {difference_count} managed changes "
@@ -614,11 +829,82 @@ if difference_count < MIN_CHANGES:
     con.close()
     sys.exit(0)
 
-if DRY_RUN:
+topology_changed = bool(
+    balancer_created
+    or added_tags
+    or removed_tags
+    or selector_changed
+)
+
+api_server = None
+hot_reload_unavailable = ""
+
+if changed_tags and not topology_changed:
+    try:
+        api_server = discover_xray_api_server()
+        print(f"Runtime action: hot update via Xray API at {api_server}")
+    except Exception as exc:
+        hot_reload_unavailable = str(exc)
+        print(f"Runtime action: controlled restart ({hot_reload_unavailable})")
+
+requires_restart = topology_changed or bool(hot_reload_unavailable)
+state = load_state()
+candidate_fingerprint = change_fingerprint(new_th, new_tags)
+
+if requires_restart:
+    if state.get("restart_candidate") == candidate_fingerprint:
+        candidate_seen = int(state.get("restart_candidate_seen", 0)) + 1
+    else:
+        candidate_seen = 1
+
+    state["restart_candidate"] = candidate_fingerprint
+    state["restart_candidate_seen"] = candidate_seen
+
+    print(
+        "Restart stability:",
+        f"{candidate_seen}/{RESTART_STABLE_RUNS} matching runs"
+    )
+
+    if DRY_RUN:
+        print("")
+        print("DRY RUN: no database, runtime or state changes were performed.")
+        con.close()
+        sys.exit(0)
+
+    if candidate_seen < RESTART_STABLE_RUNS:
+        save_state(state)
+        print("")
+        print(
+            "DEFERRED: restart-requiring change is not stable yet; "
+            "the active Xray configuration was left untouched."
+        )
+        con.close()
+        sys.exit(0)
+
+    last_restart_at = int(state.get("last_restart_at", 0) or 0)
+    cooldown_remaining = max(
+        0,
+        RESTART_COOLDOWN_SECONDS - (int(time.time()) - last_restart_at)
+    )
+    if cooldown_remaining:
+        save_state(state)
+        print("")
+        print(
+            "DEFERRED: restart cooldown is active for another "
+            f"{cooldown_remaining} seconds."
+        )
+        con.close()
+        sys.exit(0)
+
+elif DRY_RUN:
     print("")
-    print("DRY RUN: no database changes or service restart were performed.")
+    print("DRY RUN: no database, runtime or state changes were performed.")
     con.close()
     sys.exit(0)
+else:
+    # Endpoint-only hot updates never need restart stability state.
+    state["restart_candidate"] = ""
+    state["restart_candidate_seen"] = 0
 
 
 # ============================================================
@@ -691,7 +977,7 @@ con.close()
 
 
 # ============================================================
-# RESTART + ROLLBACK SAFETY
+# APPLY TO RUNNING XRAY
 # ============================================================
 
 print("")
@@ -706,7 +992,30 @@ print(
     "UNCHANGED"
 )
 
-restart_xui_or_rollback(backup)
+runtime_action = "none"
+
+if requires_restart:
+    restart_xui_or_rollback(backup)
+    state["last_restart_at"] = int(time.time())
+    state["restart_candidate"] = ""
+    state["restart_candidate_seen"] = 0
+    runtime_action = "controlled x-ui restart"
+else:
+    try:
+        hot_swap_outbounds(api_server, changed_tags, old_th, new_th)
+        runtime_action = "Xray API hot update"
+    except Exception as exc:
+        # The database already contains the desired state. One restart is the
+        # safest way to make runtime and persistence agree after a partial API
+        # operation; future restart-requiring changes remain cooldown-limited.
+        print("")
+        print(f"WARNING: Xray API hot update failed: {exc}")
+        print("Falling back to one controlled x-ui restart...")
+        restart_xui_or_rollback(backup)
+        state["last_restart_at"] = int(time.time())
+        runtime_action = "controlled restart after hot-update failure"
+
+save_state(state)
 cleanup_old_backups()
 
 
@@ -727,4 +1036,4 @@ print(
     len(new_selector)
 )
 print("Routing rules: unchanged")
-print("x-ui restarted successfully")
+print("Runtime action:", runtime_action)

@@ -3,12 +3,11 @@ Description=Run ProxyFleet to x-ui synchronization periodically
 
 [Timer]
 OnBootSec=90s
-OnUnitInactiveSec=2min
-RandomizedDelaySec=15s
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
 AccuracySec=5s
 Persistent=true
 Unit=proxyfleet-xui-sync.service
 
 [Install]
 WantedBy=timers.target
-
