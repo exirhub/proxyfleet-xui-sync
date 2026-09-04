@@ -13,14 +13,17 @@ selector is synchronized.
 | --- | --- |
 | Same tags, only proxy IP/port/credentials changed | Hot-swap changed outbounds through Xray `HandlerService`; no x-ui restart |
 | Feed order changed but tag set is identical | No change; tags are normalized in numeric order |
-| Tag added/removed, selector changed, or balancer missing | Wait for repeated identical observations, then perform one controlled restart |
+| Fresh install with no managed TH outbounds | Apply the validated non-empty Ready pool and create the balancer immediately |
+| Tag added/removed, selector changed, or balancer missing on an existing pool | Wait for repeated identical observations, then perform one controlled restart |
 | Xray runtime API unavailable during an endpoint-only update | Fall back to the same stability and cooldown guards before restarting |
 | Hot update starts but fails | Perform one controlled restart so the database and running Xray stay consistent |
 
 The timer checks every **10 minutes**, with up to 30 seconds of random delay.
 With the default `RESTART_STABLE_RUNS=3`, a restart-requiring topology change
-must therefore remain identical for roughly 30 minutes. Ordinary endpoint
-changes behind fixed tags are applied on the first check without restarting.
+on an existing managed pool must therefore remain identical for roughly 30
+minutes. A fresh installation has no managed TH outbounds and bootstraps on the
+first successful Ready response. Ordinary endpoint changes behind fixed tags
+are applied on the first check without restarting.
 
 Hot updates use Xray's official `api rmo` and `api ado` commands. See the
 [Xray command documentation](https://xtls.github.io/document/command.html).

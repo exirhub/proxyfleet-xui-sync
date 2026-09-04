@@ -851,14 +851,25 @@ requires_restart = topology_changed or bool(hot_reload_unavailable)
 state = load_state()
 candidate_fingerprint = change_fingerprint(new_th, new_tags)
 
-if requires_restart:
-    if state.get("restart_candidate") == candidate_fingerprint:
-        candidate_seen = int(state.get("restart_candidate_seen", 0)) + 1
-    else:
-        candidate_seen = 1
+# A validated non-empty Ready feed is safe to apply immediately when x-ui has
+# no managed TH outbounds yet. Waiting for repeated timer observations here
+# leaves a fresh installation without its required outbounds and balancer.
+initial_bootstrap = not old_tags and bool(new_tag_set)
 
-    state["restart_candidate"] = candidate_fingerprint
-    state["restart_candidate_seen"] = candidate_seen
+if requires_restart:
+    if initial_bootstrap:
+        candidate_seen = RESTART_STABLE_RUNS
+        state["restart_candidate"] = candidate_fingerprint
+        state["restart_candidate_seen"] = candidate_seen
+        print("Initial bootstrap: applying the first managed TH pool immediately.")
+    else:
+        if state.get("restart_candidate") == candidate_fingerprint:
+            candidate_seen = int(state.get("restart_candidate_seen", 0)) + 1
+        else:
+            candidate_seen = 1
+
+        state["restart_candidate"] = candidate_fingerprint
+        state["restart_candidate_seen"] = candidate_seen
 
     print(
         "Restart stability:",
@@ -871,7 +882,7 @@ if requires_restart:
         con.close()
         sys.exit(0)
 
-    if candidate_seen < RESTART_STABLE_RUNS:
+    if not initial_bootstrap and candidate_seen < RESTART_STABLE_RUNS:
         save_state(state)
         print("")
         print(
@@ -882,7 +893,7 @@ if requires_restart:
         sys.exit(0)
 
     last_restart_at = int(state.get("last_restart_at", 0) or 0)
-    cooldown_remaining = max(
+    cooldown_remaining = 0 if initial_bootstrap else max(
         0,
         RESTART_COOLDOWN_SECONDS - (int(time.time()) - last_restart_at)
     )
