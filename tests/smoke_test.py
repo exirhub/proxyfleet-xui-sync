@@ -242,6 +242,36 @@ def test_feed_order_does_not_change_selector():
         assert state["last_restart_at"] == 123
 
 
+
+def test_fresh_install_bootstraps_without_stability_delay():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        database = Path(temp_dir) / "x-ui.db"
+        th_1 = outbound("TH-1", "10.0.0.1", 1080)
+        th_2 = outbound("TH-2", "10.0.0.2", 1080)
+        create_fixture_database(database, [], selector=None)
+
+        result, _, systemctl_log = invoke(
+            [th_1, th_2],
+            database,
+            temp_dir,
+            RESTART_STABLE_RUNS="3",
+            RESTART_COOLDOWN_SECONDS="3600",
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Initial bootstrap: applying the first managed TH pool immediately." in result.stdout
+        assert "DEFERRED" not in result.stdout
+        assert "Runtime action: controlled x-ui restart" in result.stdout
+        config = read_config(database)
+        managed = [item["tag"] for item in config["outbounds"] if item["tag"].startswith("TH-")]
+        assert managed == ["TH-1", "TH-2"]
+        balancer = config["routing"]["balancers"][0]
+        assert balancer["tag"] == "ADMOB-BALANCER"
+        assert balancer["selector"] == ["TH-1", "TH-2"]
+        calls = logged_calls(systemctl_log)
+        assert calls[0] == ["restart", "x-ui"]
+        assert calls[1] == ["is-active", "--quiet", "x-ui"]
+
 def test_topology_change_requires_stable_observations():
     with tempfile.TemporaryDirectory() as temp_dir:
         database = Path(temp_dir) / "x-ui.db"
@@ -276,6 +306,7 @@ def main():
         test_dry_run,
         test_fixed_tag_is_hot_swapped_without_restart,
         test_feed_order_does_not_change_selector,
+        test_fresh_install_bootstraps_without_stability_delay,
         test_topology_change_requires_stable_observations,
     ]
     for test in tests:
